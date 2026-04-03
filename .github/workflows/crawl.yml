@@ -1,0 +1,53 @@
+name: 심리상담센터 정부지원사업 일일 크롤링
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node.js 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 의존성 설치 (nodemailer)
+        run: npm install nodemailer
+
+      - name: 크롤러 실행
+        env:
+          BIZINFO_KEY:          ${{ secrets.BIZINFO_KEY }}
+          KSTARTUP_KEY:         ${{ secrets.KSTARTUP_KEY }}
+          SMES_KEY:             ${{ secrets.SMES_KEY }}
+          G2B_KEY:              ${{ secrets.G2B_KEY }}
+          GEMINI_KEY:           ${{ secrets.GEMINI_KEY }}
+          SEOUL_OPENAPI_KEY:    ${{ secrets.SEOUL_OPENAPI_KEY }}
+          BOKJIRO_KEY:          ${{ secrets.BOKJIRO_KEY }}
+          EMAIL_FROM:           ${{ secrets.EMAIL_FROM }}
+          EMAIL_APP_PASSWORD:   ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO:             ${{ secrets.EMAIL_TO }}
+          SLACK_WEBHOOK_URL:    ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: node crawler.js
+
+      - name: seen.json 커밋 (발송 이력 저장)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen.json || true
+          git diff --staged --quiet || git commit -m "chore: update seen.json [$(date +%F)]"
+          git push
+
+      - name: CSV 파일 Artifacts 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: 크롤링결과-${{ github.run_id }}
+          path: result_*.csv
+          retention-days: 30
+        if: always()
