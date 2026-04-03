@@ -23,7 +23,7 @@ const KEYWORDS = (process.env.KEYWORDS || [
   "EAP", "근로자지원프로그램", "직장인 심리상담",
   "트라우마", "자살예방", "생명존중",
   "소상공인 지원", "소규모 사업장 지원", "영세사업자 지원",
-  "창업지원", "사회적기업", "사회적경제",
+  "창업지원", "여성창업", "여성기업", "사회적기업", "사회적경제",
   "고용안정", "일자리 창출", "인건비 지원",
   "진로상담", "학교상담", "Wee센터",
 ].join(","))
@@ -73,16 +73,27 @@ const POSITIVE_PATTERNS = [
   "사회적기업", "사회적경제",
   "인건비", "운영비", "보조금",
   "소상공인", "영세", "소규모",
+  "여성기업", "여성창업", "여성기업확인",
   "진로상담", "학교상담", "wee",
-  "강남구", "강남",
+  "강남구", "강남", "서울", "전국", "비대면", "온라인",
 ];
 
-const GANGNAM_INCLUDE = ["강남", "강남구", "서울", "수도권", "전국", "온라인", "비대면", "서초", "송파"];
+const LOCATION_INCLUDE = ["서울", "전국", "비대면", "온라인"];
 const REGION_EXCLUDE = [
   "부산","대구","인천","광주","대전","울산","세종",
   "경기","강원","충북","충남","전북","전남","경북","경남","제주",
   "충청","전라","경상","호남","영남","강원도"
 ];
+
+const FOCUS_BUSINESS_KEYWORDS = [
+  "창업지원", "사업화", "초기창업", "예비창업", "여성기업", "여성창업", "여성기업확인", "여성전용"
+];
+
+const COMPANY_PROFILE = {
+  officeRegion: process.env.COMPANY_OFFICE_REGION || "서울",
+  foundedDate: process.env.COMPANY_FOUNDED_DATE || "2026-01-01",
+  womenFounded: (process.env.COMPANY_WOMEN_FOUNDED || "true").toLowerCase() === "true",
+};
 
 const GEMINI_SEARCH_QUERIES = [
   "2026 심리상담 바우처 제공기관 모집",
@@ -97,6 +108,9 @@ const GEMINI_SEARCH_QUERIES = [
   "2026 강남구 심리상담 위탁운영 공고",
   "2026 사회서비스 전자바우처 심리상담 신규 제공기관",
   "2026 서울시 트라우마 심리지원 수행기관 모집",
+  "2026 서울 여성기업 창업지원 심리상담센터",
+  "2026 여성창업 지원사업 서울 비대면 상담서비스",
+  "2026 전국 여성기업 확인제도 연계 창업지원 공고",
 ];
 
 const logs = [];
@@ -173,6 +187,12 @@ function parseDeadline(str) {
   const m = str.match(/(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return null;
   return new Date(+m[1], +m[2] - 1, +m[3]);
+}
+
+function yearsSince(dateStr, 기준일) {
+  const start = parseDeadline(dateStr);
+  if (!start || !기준일) return null;
+  return (기준일.getTime() - start.getTime()) / 31557600000;
 }
 
 function isExpired(str) {
@@ -570,7 +590,8 @@ async function fetchGemini(query) {
 
 검색어: ${query}
 
-우리는 서울 강남구에 위치한 심리상담센터(개인사업자 + 법인 병행)다. 다음 기회를 찾고 있다.
+우리는 서울에 사무실이 있는 심리상담센터(개인사업자 + 법인 병행)다.
+2026년 1월 여성 창업(여성기업) 배경을 고려해 다음 기회를 찾고 있다.
 - 심리상담 바우처 제공기관 등록/모집 (마음투자, 전자바우처 등)
 - 심리상담 위탁운영, 지정기관, 수행기관 모집 공고
 - 지역사회서비스 투자사업 (아동·청소년 심리지원, 정서발달, 성인 심리지원 등)
@@ -579,6 +600,7 @@ async function fetchGemini(query) {
 - 진로상담, 학교상담 위탁기관 모집
 - EAP(근로자지원프로그램) 상담기관 등록
 - 창업/사업화 지원 (심리상담센터가 받을 수 있는 것)
+- 여성기업/여성창업 전용 지원사업
 
 반드시 아래 원칙을 지켜라.
 1. 실제 검색으로 확인된 공고만 포함
@@ -705,13 +727,46 @@ function regionScore(text) {
   if (!text) return 0;
   if (isExplicitlyOtherRegionOnly(text)) return -4;
 
-  const hasAnyRegionKeyword = [...GANGNAM_INCLUDE, ...REGION_EXCLUDE].some(k => text.includes(k));
+  const hasAnyRegionKeyword = [...LOCATION_INCLUDE, ...REGION_EXCLUDE].some(k => text.includes(k));
   if (!hasAnyRegionKeyword) return 1;
 
-  if (text.includes("강남") || text.includes("강남구")) return 4;
-  if (GANGNAM_INCLUDE.some(k => text.includes(k))) return 2;
+  if (text.includes("서울")) return 4;
+  if (LOCATION_INCLUDE.some(k => text.includes(k))) return 3;
 
   return 0;
+}
+
+function hasPreferredLocation(text, source) {
+  if (source === "gangnam" || source === "seoul_openapi") return true;
+  if (LOCATION_INCLUDE.some(k => text.includes(k))) return true;
+  return false;
+}
+
+function isEligibleByCompanyProfile(text, deadline, profile) {
+  const refDate = parseDeadline(deadline) || new Date();
+  const foundedYears = yearsSince(profile.foundedDate, refDate);
+
+  if ((text.includes("여성기업") || text.includes("여성창업")) && !profile.womenFounded) {
+    return false;
+  }
+
+  const atMostMatch = text.match(/(창업|업력).{0,8}(\d+)\s*년\s*(이내|미만)/);
+  if (atMostMatch && foundedYears !== null) {
+    const limit = Number(atMostMatch[2]);
+    if (Number.isFinite(limit) && foundedYears > limit) return false;
+  }
+
+  const atLeastMatch = text.match(/(창업|업력).{0,8}(\d+)\s*년\s*이상/);
+  if (atLeastMatch && foundedYears !== null) {
+    const minYears = Number(atLeastMatch[2]);
+    if (Number.isFinite(minYears) && foundedYears < minYears) return false;
+  }
+
+  if (text.includes("서울") && text.includes("소재") && profile.officeRegion !== "서울") {
+    return false;
+  }
+
+  return true;
 }
 
 function computeScore(r) {
@@ -758,6 +813,7 @@ function computeScore(r) {
 
   if (text.includes("물품") && !text.includes("상담") && !text.includes("심리")) score -= 4;
   if (text.includes("납품") && !text.includes("서비스") && !text.includes("상담")) score -= 4;
+  if (FOCUS_BUSINESS_KEYWORDS.some(w => text.includes(w.toLowerCase()))) score += 4;
 
   return score;
 }
@@ -766,6 +822,15 @@ function filterResults(results) {
   return results
     .filter(r => r && r.name && r.name.length >= 5)
     .filter(r => !isExpired(r.deadline))
+    .filter(r => {
+      const text = normalizeText(compactText(r.name, r.agency, r.target, r.summary));
+      if (isExplicitlyOtherRegionOnly(text)) return false;
+      return hasPreferredLocation(text, r.source);
+    })
+    .filter(r => {
+      const text = normalizeText(compactText(r.name, r.agency, r.target, r.summary));
+      return isEligibleByCompanyProfile(text, r.deadline, COMPANY_PROFILE);
+    })
     .map(r => ({ ...r, score: computeScore(r) }))
     .filter(r => r.score >= 2);
 }
@@ -1035,6 +1100,7 @@ async function main() {
 
   const today = new Date().toISOString().slice(0, 10);
   log(`=== 심리상담센터 지원사업 크롤링 시작: ${today} ===`);
+  log(`회사 프로필: ${COMPANY_PROFILE.officeRegion} 사무실 / 설립 ${COMPANY_PROFILE.foundedDate} / 여성창업 ${COMPANY_PROFILE.womenFounded ? "Y" : "N"}`);
 
   let allResults = [];
   let errorCount = 0;
