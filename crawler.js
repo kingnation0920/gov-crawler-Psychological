@@ -1,4 +1,3 @@
-
 const https = require("https");
 const http = require("http");
 
@@ -139,28 +138,32 @@ function fetchJson(url) {
 
 function fetchPost(url, body) {
   return new Promise((resolve, reject) => {
+    const bodyStr = JSON.stringify(body);
     const urlObj = new URL(url);
-    const bodyStr = typeof body === "string" ? body : JSON.stringify(body);
+
     const options = {
       hostname: urlObj.hostname,
-      port: urlObj.port || (url.startsWith("https") ? 443 : 80),
       path: urlObj.pathname + urlObj.search,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(bodyStr),
-        "User-Agent": "GovCrawler/1.0",
-      },
+        "User-Agent": "GovCrawler/1.0"
+      }
     };
-    const lib = url.startsWith("https") ? https : http;
-    const req = lib.request(options, (res) => {
+
+    const req = https.request(options, (res) => {
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => {
-        try { resolve(JSON.parse(data)); }
-        catch (e) { reject(new Error("JSON parse error: " + data.substring(0, 200))); }
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(new Error("JSON parse: " + data.substring(0, 200)));
+        }
       });
     });
+
     req.on("error", reject);
     req.write(bodyStr);
     req.end();
@@ -217,24 +220,351 @@ function compactText(...parts) {
   return parts
     .filter(Boolean)
     .join(" ")
-    .substring(0, 500);
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function normalizeText(str) {
-  return (str || "").toLowerCase().replace(/\s+/g, " ").trim();
+function normalizeText(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+async function fetchBizinfoAll() {
+  const url =
+    "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
+    + "?crtfcKey=" + encodeURIComponent(KEYS.bizinfo)
+    + "&dataType=json"
+    + "&numOfRows=500&pageNo=1";
+
+  const data = await fetchJson(url);
+
+  let list = [];
+  if (data.jsonArray) list = data.jsonArray;
+  else if (data.items) list = data.items;
+  else if (data.response?.body?.items) list = data.response.body.items;
+  else if (data.data) list = data.data;
+  else if (Array.isArray(data)) list = data;
+  else {
+    for (const k of Object.keys(data)) {
+      if (Array.isArray(data[k]) && data[k].length > 0) {
+        list = data[k];
+        break;
+      }
+    }
+  }
+
+  return list.map(it => ({
+    name: (it.pblancNm || it.title || "").trim(),
+    target: (it.trgetNm || "").trim(),
+    deadline: normalizeDate(it.reqstEndDe || it.endDate || ""),
+    summary: (it.bsnsSumryCn || it.description || "").trim().substring(0, 120),
+    url: it.pblancUrl || it.link || (it.pblancId ? "https://www.bizinfo.go.kr/see/seea/selectSEEA140Detail.do?pblancId=" + it.pblancId : ""),
+    source: "bizinfo",
+    agency: (it.jrsdInsttNm || it.author || "").trim()
+  })).filter(it => it.name.length >= 5);
+}
+
+async function fetchKStartup(keyword) {
+  const url =
+    "https://apis.data.go.kr/B552735/kisedKstartupService01/getAnnouncementInformation01"
+    + "?ServiceKey=" + KEYS.kstartup
+    + "&page=1&perPage=100&returnType=json";
+
+  const data = await fetchJson(url);
+  let list = [];
+
+  if (data.data && Array.isArray(data.data)) list = data.data;
+  else if (data.items) {
+    const raw = data.items;
+    list = Array.isArray(raw) ? raw : (raw.item ? (Array.isArray(raw.item) ? raw.item : [raw.item]) : []);
+  }
+
+  const kwLower = keyword.toLowerCase();
+
+  return list
+    .filter(it => {
+      const text = normalizeText(compactText(it.biz_pbanc_nm, it.pbanc_ctnt, it.aply_trgt, it.sprv_inst));
+      return text.includes(kwLower);
+    })
+    .map(it => {
+      let detailUrl = it.detl_pg_url || "";
+      if (detailUrl && !detailUrl.startsWith("http")) detailUrl = "https://" + detailUrl;
+
+      return {
+        name: (it.biz_pbanc_nm || "").trim(),
+        target: (it.aply_trgt || "").trim(),
+        deadline: normalizeDate(it.pbanc_rcpt_end_dt || ""),
+        summary: (it.pbanc_ctnt || "").trim().substring(0, 120),
+        url: detailUrl || "https://www.k-startup.go.kr",
+        source: "kstartup",
+        agency: (it.sprv_inst || "창업진흥원").trim()
+      };
+    });
+}
+
+async function fetchSmes(keyword) {
+  const url =
+    "https://www.smes.go.kr/fnct/apiReqst/extPblancInfo"
+    + "?authKey=" + encodeURIComponent(KEYS.smes)
+    + "&pageNo=1&dataRows=30&type=json";
+
+  const data = await fetchJson(url);
+  let list = [];
+
+  if (data.response?.body?.items) {
+    list = data.response.body.items;
+    if (!Array.isArray(list)) {
+      list = list.item ? (Array.isArray(list.item) ? list.item : [list.item]) : [];
+    }
+  } else if (data.items) {
+    list = data.items;
+  } else if (data.data) {
+    list = data.data;
+  }
+
+  const kw = keyword.toLowerCase();
+
+  return list
+    .filter(it => {
+      const text = normalizeText(compactText(it.pblancNm, it.title, it.bsnsSumryCn, it.trgetNm, it.jrsdInsttNm));
+      return text.includes(kw);
+    })
+    .map(it => ({
+      name: (it.pblancNm || it.title || "").trim(),
+      target: (it.trgetNm || "").trim(),
+      deadline: normalizeDate(it.reqstEndDe || it.endDe || ""),
+      summary: (it.bsnsSumryCn || "").trim().substring(0, 120),
+      url: it.pblancUrl || it.detailUrl || "https://www.smes.go.kr",
+      source: "smes",
+      agency: (it.jrsdInsttNm || "").trim()
+    }));
+}
+
+async function fetchG2b(keyword) {
+  const now = new Date();
+  const bgnDt = formatG2bDate(new Date(now.getTime() - 30 * 86400000));
+  const endDt = formatG2bDate(new Date(now.getTime() + 90 * 86400000));
+
+  const url =
+    "https://apis.data.go.kr/1230000/BidPublicInfoService/getBidPblancListInfoServc"
+    + "?ServiceKey=" + encodeURIComponent(KEYS.g2b)
+    + "&inqryDiv=1&type=json"
+    + "&inqryBgnDt=" + bgnDt
+    + "&inqryEndDt=" + endDt
+    + "&numOfRows=100&pageNo=1";
+
+  const data = await fetchJson(url);
+
+  let list = [];
+  if (data.response?.body?.items) {
+    list = data.response.body.items;
+    if (!Array.isArray(list)) {
+      list = list.item ? (Array.isArray(list.item) ? list.item : [list.item]) : [];
+    }
+  }
+
+  const kw = keyword.toLowerCase();
+
+  return list
+    .filter(it => {
+      const text = normalizeText(compactText(
+        it.bidNtceNm,
+        it.prdctClsfcNoNm,
+        it.ntceInsttNm,
+        it.ntceInsttOfclNm,
+        it.dminsttNm
+      ));
+      return text.includes(kw);
+    })
+    .map(it => ({
+      name: (it.bidNtceNm || it.prdctClsfcNoNm || "").trim(),
+      target: (it.ntceInsttNm || "").trim(),
+      deadline: normalizeDate(it.bidClseDt || it.bidBeginDt || ""),
+      summary: (it.ntceInsttOfclNm || "").trim().substring(0, 120),
+      url: it.bidNtceDtlUrl || (it.bidNtceNo ? "https://www.g2b.go.kr:8101/ep/invitation/publish/bidInfoDtl.do?bidno=" + it.bidNtceNo : ""),
+      source: "g2b",
+      agency: (it.dminsttNm || it.ntceInsttNm || "").trim()
+    }));
+}
+
+async function fetchSeoulOpenApi() {
+  if (!KEYS.seoulOpenApi) return [];
+
+  let results = [];
+
+  try {
+    const url = `http://openapi.seoul.go.kr:8088/${KEYS.seoulOpenApi}/json/GovSupportBizInfo/1/100/`;
+    const data = await fetchJson(url);
+
+    let list = [];
+    const root = data.GovSupportBizInfo;
+    if (root?.row) list = root.row;
+
+    const matched = list
+      .filter(it => {
+        const text = normalizeText(compactText(it.BIZ_NM, it.BIZ_CN, it.BASS_APLY_QUAL, it.CHRG_INST_NM));
+        return KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+      })
+      .map(it => ({
+        name: (it.BIZ_NM || "").trim(),
+        target: (it.BASS_APLY_QUAL || "").trim(),
+        deadline: normalizeDate(it.APLY_END_DE || ""),
+        summary: (it.BIZ_CN || "").trim().substring(0, 120),
+        url: it.DETAIL_URL || it.APLY_SITE_ADDR || "https://www.seoul.go.kr",
+        source: "seoul_openapi",
+        agency: (it.CHRG_INST_NM || "서울시").trim()
+      }));
+
+    results = results.concat(matched);
+    log(`[seoul_openapi] 서울시 지원사업: ${matched.length}건`);
+  } catch (e) {
+    log(`[seoul_openapi] ERROR: ${e.message}`);
+  }
+
+  return results;
+}
+
+async function fetchBokjiro() {
+  if (!KEYS.bokjiro) return [];
+
+  const endpoints = [
+    {
+      label: "중앙부처 복지서비스",
+      url: "https://apis.data.go.kr/B554287/LocalGovernmentWelfareInformations/LcgvWelfarelist"
+        + "?ServiceKey=" + encodeURIComponent(KEYS.bokjiro)
+        + "&pageNo=1&numOfRows=100&type=json",
+      source: "bokjiro_central",
+    },
+    {
+      label: "지자체 복지서비스",
+      url: "https://apis.data.go.kr/B554287/LocalGovernmentWelfareInformations/LcgvWelfarelist"
+        + "?ServiceKey=" + encodeURIComponent(KEYS.bokjiro)
+        + "&pageNo=1&numOfRows=100&type=json"
+        + "&lifeArray=&charTrgterArray=&trgterIndvdlArray=&desireArray=020",
+      source: "bokjiro_local",
+    },
+  ];
+
+  let results = [];
+
+  for (const ep of endpoints) {
+    try {
+      const data = await fetchJson(ep.url);
+
+      let list = [];
+      if (data.response?.body?.items?.item) {
+        const raw = data.response.body.items.item;
+        list = Array.isArray(raw) ? raw : [raw];
+      } else if (data.wantedList) {
+        list = data.wantedList;
+      } else if (data.data) {
+        list = Array.isArray(data.data) ? data.data : [];
+      } else if (data.response?.body?.items) {
+        const raw = data.response.body.items;
+        list = Array.isArray(raw) ? raw : [];
+      }
+
+      const matched = list
+        .filter(it => {
+          const text = normalizeText(compactText(
+            it.servNm, it.servDgst, it.lifeNmArray, it.intrsThemaNmArray,
+            it.trgterIndvdlNmArray, it.bizChrNm, it.ctpvNm, it.sggNm
+          ));
+          return KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+        })
+        .map(it => {
+          const servId = it.servId || it.wlfareInfoId || "";
+          const detailUrl = servId
+            ? `https://www.bokjiro.go.kr/ssis-tbu/twataa/wlfareInfo/moveTWAT52011M.do?wlfareInfoId=${servId}`
+            : "https://www.bokjiro.go.kr";
+
+          return {
+            name: (it.servNm || "").trim(),
+            target: (it.trgterIndvdlNmArray || it.lifeNmArray || "").trim(),
+            deadline: normalizeDate(it.aplyEndDt || it.endDt || ""),
+            summary: (it.servDgst || "").trim().substring(0, 120),
+            url: it.servDtlLink || detailUrl,
+            source: ep.source,
+            agency: (it.bizChrNm || it.ctpvNm || "복지로").trim()
+          };
+        })
+        .filter(it => it.name.length >= 5);
+
+      results = results.concat(matched);
+      log(`[bokjiro] ${ep.label}: ${matched.length}건`);
+    } catch (e) {
+      log(`[bokjiro] ${ep.label} ERROR: ${e.message}`);
+    }
+    await sleep(1000);
+  }
+
+  return results;
+}
+
+async function fetchGangnamNotices() {
+  const searchTerms = ["심리상담", "심리지원", "마음건강", "위탁운영", "바우처", "상담기관"];
+  let results = [];
+
+  for (const term of searchTerms) {
+    try {
+      const url = `https://www.gangnam.go.kr/portal/bbs/search.do?searchText=${encodeURIComponent(term)}&pageIndex=1&pageSize=10&category=notice&output=json`;
+      const data = await fetchJson(url);
+
+      let list = [];
+      if (data.resultList) list = data.resultList;
+      else if (data.list) list = data.list;
+      else if (Array.isArray(data)) list = data;
+
+      const matched = list
+        .filter(it => {
+          const title = (it.title || it.nttSj || "").trim();
+          return title.length >= 5;
+        })
+        .map(it => {
+          const title = (it.title || it.nttSj || "").trim();
+          const bbsId = it.bbsId || it.bbs_id || "";
+          const nttId = it.nttId || it.ntt_id || it.id || "";
+          let detailUrl = "";
+          if (bbsId && nttId) {
+            detailUrl = `https://www.gangnam.go.kr/portal/bbs/${bbsId}/${nttId}/view.do`;
+          }
+          return {
+            name: title,
+            target: "",
+            deadline: normalizeDate(it.endDe || it.rcptEndDe || ""),
+            summary: (it.cn || it.nttCn || "").trim().substring(0, 120),
+            url: detailUrl || "https://www.gangnam.go.kr",
+            source: "gangnam",
+            agency: "강남구청"
+          };
+        });
+
+      results = results.concat(matched);
+    } catch (e) {
+      log(`[gangnam] ${term} ERROR: ${e.message}`);
+    }
+    await sleep(800);
+  }
+
+  log(`[gangnam] 총 ${results.length}건`);
+  return results;
 }
 
 async function fetchSocialServicePortal() {
-  const results = [];
-  const terms = KEYWORDS.slice(0, 10);
+  const searchTerms = ["심리상담", "심리지원", "정서발달", "부모상담", "정신건강"];
+  let results = [];
 
-  for (const term of terms) {
+  for (const term of searchTerms) {
     try {
-      const url = `https://www.socialservice.or.kr:444/user/htmlEditor/viewMainList.do?searchWord=${encodeURIComponent(term)}&pageIndex=1&pageUnit=20`;
-      const json = await fetchJson(url);
-      const items = json?.resultList || json?.list || [];
-      const matched = items.map(it => ({
-        name: (it.svcNm || it.title || "").trim(),
+      const url = `https://www.socialservice.or.kr:444/user/htmlEditor/rssList.do?searchWord=${encodeURIComponent(term)}`;
+      const data = await fetchJson(url);
+
+      let list = [];
+      if (data.resultList) list = data.resultList;
+      else if (data.list) list = data.list;
+      else if (Array.isArray(data)) list = data;
+
+      const matched = list.map(it => ({
+        name: (it.title || it.svcNm || "").trim(),
         target: (it.trgtNm || "").trim(),
         deadline: normalizeDate(it.endDe || ""),
         summary: (it.cn || it.svcCn || "").trim().substring(0, 120),
@@ -243,7 +573,7 @@ async function fetchSocialServicePortal() {
         agency: (it.insttNm || "사회서비스포털").trim()
       })).filter(it => it.name.length >= 5);
 
-      results.push(...matched);
+      results = results.concat(matched);
     } catch (e) {
       log(`[socialservice] ${term} ERROR: ${e.message}`);
     }
@@ -296,50 +626,90 @@ async function fetchGemini(query) {
     "agency":"기관"
   }
 ]
-`;
+`.trim();
 
-  try {
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${KEYS.gemini}`;
-    const body = { contents: [{ parts: [{ text: prompt }] }] };
-    const json = await fetchPost(apiUrl, body);
-    return parseGeminiResponse(json);
-  } catch (e) {
-    log(`[gemini] ERROR: ${e.message}`);
-    return [];
-  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${KEYS.gemini}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }],
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 4096
+    }
+  };
+
+  const data = await fetchPost(url, body);
+  return parseGeminiResponse(data);
 }
 
 function parseGeminiResponse(apiResponse) {
-  try {
-    const text = apiResponse?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) return [];
-    const arr = JSON.parse(jsonMatch[0]);
-    if (!Array.isArray(arr)) return [];
+  const candidates = apiResponse.candidates || [];
+  if (!candidates.length) return [];
 
-    return arr
-      .filter(r => r && typeof r === "object")
-      .map(r => ({
-        name: String(r.name || "").trim(),
-        target: String(r.target || "").trim(),
-        deadline: String(r.deadline || "2026-12-31").trim(),
-        summary: String(r.summary || "").trim().substring(0, 120),
-        url: String(r.url || "").trim(),
-        source: "gemini",
-        agency: String(r.agency || "").trim(),
-      }))
-      .filter(r => {
-        if (!r.name || r.name.length < 5) return false;
-        if (!r.url || !r.url.startsWith("http")) return false;
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(r.deadline)) {
-          r.deadline = "2026-12-31";
-        }
-        return true;
-      });
-  } catch (e) {
-    log(`[gemini] parse ERROR: ${e.message}`);
-    return [];
+  const candidate = candidates[0];
+  const parts = candidate.content?.parts || [];
+
+  let textParts = parts.filter(p => p.text !== undefined && p.thought !== true);
+  if (!textParts.length) textParts = parts.filter(p => p.text !== undefined);
+
+  let fullText = textParts.map(p => p.text || "").join(" ")
+    .replace(/```json\s*/gi, "")
+    .replace(/```\s*/g, "")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+    .replace(/\n/g, " ")
+    .replace(/\r/g, " ")
+    .trim();
+
+  let results = null;
+  try {
+    const m = fullText.match(/\[[\s\S]*\]/);
+    if (m) results = JSON.parse(m[0]);
+  } catch (_) {}
+
+  if (!results) return [];
+
+  const grounding = candidate.groundingMetadata;
+  const urlPool = [];
+
+  if (grounding?.groundingChunks) {
+    for (const chunk of grounding.groundingChunks) {
+      const w = chunk.web;
+      if (w?.uri && !w.uri.includes("vertexaisearch")) {
+        urlPool.push({
+          title: (w.title || "").toLowerCase(),
+          uri: w.uri
+        });
+      }
+    }
   }
+
+  return results
+    .map(r => ({
+      name: String(r?.name || "").trim(),
+      target: String(r?.target || "").trim(),
+      deadline: String(r?.deadline || "").trim(),
+      summary: String(r?.summary || "").trim().substring(0, 80),
+      url: String(r?.url || "").trim(),
+      source: "gemini",
+      agency: String(r?.agency || "").trim()
+    }))
+    .filter(r => {
+      if (!r.name || r.name.length < 5) return false;
+
+      if (!r.url.startsWith("http") || r.url.includes("vertexaisearch")) {
+        const words = r.name.toLowerCase().split(/\s+/);
+        r.url =
+          urlPool.find(u => words.some(w => w.length >= 2 && u.title.includes(w)))?.uri
+          || urlPool[0]?.uri
+          || `https://www.google.com/search?q=${encodeURIComponent(r.name)}`;
+      }
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(r.deadline)) {
+        r.deadline = "2026-12-31";
+      }
+
+      return true;
+    });
 }
 
 function isExplicitlyOtherRegionOnly(text) {
@@ -479,138 +849,4 @@ function deduplicateResults(results) {
   });
 }
 
-const SEEN_FILE = "seen.json";
-
-function loadSeen() {
-  const fs = require("fs");
-  try {
-    if (fs.existsSync(SEEN_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SEEN_FILE, "utf-8"));
-      return new Set(Array.isArray(data) ? data : []);
-    }
-  } catch (e) {
-    log(`[seen] load error: ${e.message}`);
-  }
-  return new Set();
-}
-
-function saveSeen(set) {
-  const fs = require("fs");
-  try {
-    fs.writeFileSync(SEEN_FILE, JSON.stringify([...set]), "utf-8");
-  } catch (e) {
-    log(`[seen] save error: ${e.message}`);
-  }
-}
-
-async function sendEmail(html, csv, date, count) {
-  const nodemailer = require("nodemailer");
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT) || 587,
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP__PASS,
-    },
-  });
-
-  await transporter.sendMail({
-    from: `"심리상담센터 지원사업 크롤러" <${process.env.EMAIL_FROM}>`,
-    to: process.env.EMAIL_TO,
-    subject: `[심리상담 지원사업] ${date} 크롤링 결과 — ${count}건`,
-    html,
-    attachments: [{
-      filename: `심리상담_지원사업_${date}.csv`,
-      content: Buffer.from(csv, "utf-8"),
-      contentType: "text/csv; charset=utf-8",
-    }],
-  });
-
-  log(`이메일 전송 완료 → ${process.env.EMAIL_TO}`);
-}
-
-async function main() {
-  if (!KEYS.bizinfo) {
-    console.error("오류: BIZINFO_KEY 환경변수가 없습니다.");
-    process.exit(1);
-  }
-
-  const today = new Date().toISOString().slice(0, 10);
-  log(`=== 심리상담센터 지원사업 크롤링 시작: ${today} ===`);
-  log(`회사 프로필: ${COMPANY_PROFILE.officeRegion} 사무실 / 설립 ${COMPANY_PROFILE.foundedDate} / 여성창업 ${COMPANY_PROFILE.womenFounded ? "Y" : "N"}`);
-
-  let allResults = [];
-  let errorCount = 0;
-
-  for (const kw of KEYWORDS) {
-    if (KEYS.kstartup) {
-      try {
-        const r = await fetchKStartup(kw);
-        allResults = allResults.concat(r);
-        log(`[k-startup] ${kw}: ${r.length}건`);
-      } catch (e) { errorCount++; log(`[k-startup] ${kw} ERROR: ${e.message}`); }
-      await sleep(1200);
-    }
-
-    if (KEYS.smes) {
-      try {
-        const r = await fetchSmes(kw);
-        allResults = allResults.concat(r);
-        log(`[smes] ${kw}: ${r.length}건`);
-      } catch (e) { errorCount++; log(`[smes] ${kw} ERROR: ${e.message}`); }
-      await sleep(1200);
-    }
-
-    if (KEYS.g2b) {
-      try {
-        const r = await fetchG2b(kw);
-        allResults = allResults.concat(r);
-        log(`[g2b] ${kw}: ${r.length}건`);
-      } catch (e) { errorCount++; log(`[g2b] ${kw} ERROR: ${e.message}`); }
-      await sleep(1200);
-    }
-  }
-
-  const filtered = filterResults(deduplicateResults(allResults));
-  const seenKeys = loadSeen();
-  const newResults = filtered.filter(r => !seenKeys.has(r.name + r.agency + r.deadline));
-  newResults.forEach(r => seenKeys.add(r.name + r.agency + r.deadline));
-  saveSeen(seenKeys);
-
-  log(`신규 ${newResults.length}건 / 전체 필터 ${filtered.length}건`);
-
-  if (newResults.length === 0) {
-    log("신규 공고 없음. 이메일 생략.");
-    return;
-  }
-
-  const csv = [
-    ["사업명","대상","마감일","D-Day","기관","요약","URL","소스","점수"].join(","),
-    ...newResults.map(r => [
-      r.name, r.target, r.deadline,
-      dDay(r.deadline) ?? "",
-      r.agency, r.summary, r.url, r.source, r.score
-    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(","))
-  ].join("\n");
-
-  const html = `<h2>심리상담 지원사업 크롤링 결과 (${today})</h2>
-<p>신규 ${newResults.length}건</p>
-<table border="1" cellpadding="4">
-<tr><th>사업명</th><th>대상</th><th>마감</th><th>D-Day</th><th>기관</th><th>요약</th><th>점수</th></tr>
-${newResults.map(r => `<tr>
-  <td><a href="${r.url}">${r.name}</a></td>
-  <td>${r.target}</td><td>${r.deadline}</td>
-  <td>${dDay(r.deadline) ?? "-"}</td>
-  <td>${r.agency}</td><td>${r.summary}</td>
-  <td>${r.score}</td>
-</tr>`).join("")}
-</table>`;
-
-  await sendEmail(html, csv, today, newResults.length);
-}
-
-main().catch(e => {
-  console.error("FATAL:", e);
-  process.exit(1);
-});
+const SEEN_FILE = "se
