@@ -1,9 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
-diff --git a/crawler.js b/crawler.js
-index 68247b8606ef69b141f30e2eee5d11dc8fd85d5c..b4925e95aaec36db609422098ac14132677c9f94 100644
---- a/crawler.js
-+++ b/crawler.js
-@@ -1,124 +1,138 @@
  const https = require("https");
  const http = require("http");
  
@@ -475,6 +469,3 @@ index 68247b8606ef69b141f30e2eee5d11dc8fd85d5c..b4925e95aaec36db609422098ac14132
  
      if (KEYS.g2b) {
        try {
- 
-EOF
-)
